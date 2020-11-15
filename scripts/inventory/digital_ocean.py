@@ -22,7 +22,8 @@ found.  You can force this script to use the cache with --force-cache.
 
 ----
 Configuration is read from `digital_ocean.ini`, then from environment variables,
-and then from command-line arguments.
+and then from command-line arguments.  A custom location for the
+`digital_ocean.ini` file can be specified by the DO_INI_FILE variable.
 
 Most notably, the DigitalOcean API Token must be specified. It can be specified
 in the INI file or with the following environment variables:
@@ -76,7 +77,7 @@ For each host, the following variables are registered:
 ```
 usage: digital_ocean.py [-h] [--list] [--host HOST] [--all] [--droplets]
                         [--regions] [--images] [--sizes] [--ssh-keys]
-                        [--domains] [--tags] [--pretty]
+                        [--floating-ips] [--domains] [--tags] [--pretty]
                         [--cache-path CACHE_PATH]
                         [--cache-max_age CACHE_MAX_AGE] [--force-cache]
                         [--refresh-cache] [--env] [--api-token API_TOKEN]
@@ -95,6 +96,7 @@ optional arguments:
   --images              List Images as JSON
   --sizes               List Sizes as JSON
   --ssh-keys            List SSH keys as JSON
+  --floating-ips        List floating ips as JSON
   --domains             List Domains as JSON
   --tags                List Tags as JSON
   --pretty, -p          Pretty-print results
@@ -202,6 +204,10 @@ class DoManager:
         resp = self.send('account/keys')
         return resp['ssh_keys']
 
+    def all_floating_ips(self):
+        resp = self.send('floating_ips/')
+        return resp['floating_ips']
+
     def all_domains(self):
         resp = self.send('domains/')
         return resp['domains']
@@ -267,6 +273,7 @@ class DigitalOceanInventory(object):
         # Pick the json_data to print based on the CLI command
         if self.args.droplets:
             self.load_from_digital_ocean('droplets')
+            json_data = {'floating_ips': self.data['floating_ips']}
             json_data = {'droplets': self.data['droplets']}
         elif self.args.regions:
             self.load_from_digital_ocean('regions')
@@ -280,6 +287,9 @@ class DigitalOceanInventory(object):
         elif self.args.ssh_keys:
             self.load_from_digital_ocean('ssh_keys')
             json_data = {'ssh_keys': self.data['ssh_keys']}
+        elif self.args.floating_ips:
+            self.load_from_digital_ocean('floating_ips')
+            json_data = {'floating_ips': self.data['floating_ips']}
         elif self.args.domains:
             self.load_from_digital_ocean('domains')
             json_data = {'domains': self.data['domains']}
@@ -311,7 +321,10 @@ class DigitalOceanInventory(object):
     def read_settings(self):
         """ Reads the settings from the digital_ocean.ini file """
         config = ConfigParser.ConfigParser()
-        config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'digital_ocean.ini')
+        if os.getenv("DO_INI_FILE"):
+            config_path = os.getenv("DO_INI_FILE")
+        else:
+            config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'digital_ocean.ini')
         config.read(config_path)
 
         # Credentials
@@ -353,6 +366,7 @@ class DigitalOceanInventory(object):
         parser.add_argument('--images', action='store_true', help='List Images as JSON')
         parser.add_argument('--sizes', action='store_true', help='List Sizes as JSON')
         parser.add_argument('--ssh-keys', action='store_true', help='List SSH keys as JSON')
+        parser.add_argument('--floating-ips', action='store_true', help='List floating ips as JSON')
         parser.add_argument('--domains', action='store_true', help='List Domains as JSON')
         parser.add_argument('--tags', action='store_true', help='List Tags as JSON')
 
@@ -375,8 +389,8 @@ class DigitalOceanInventory(object):
         # Make --list default if none of the other commands are specified
         if (not self.args.droplets and not self.args.regions and
                 not self.args.images and not self.args.sizes and
-                not self.args.ssh_keys and not self.args.domains and
-                not self.args.tags and
+                not self.args.ssh_keys and not self.args.floating_ips and
+                not self.args.domains and not self.args.tags and
                 not self.args.all and not self.args.host):
             self.args.list = True
 
@@ -396,6 +410,7 @@ class DigitalOceanInventory(object):
 
         if resource == 'droplets' or resource is None:
             self.data['droplets'] = self.manager.all_active_droplets()
+            self.data['floating_ips'] = self.manager.all_floating_ips()
             self.cache_refreshed = True
         if resource == 'regions' or resource is None:
             self.data['regions'] = self.manager.all_regions()
@@ -408,6 +423,9 @@ class DigitalOceanInventory(object):
             self.cache_refreshed = True
         if resource == 'ssh_keys' or resource is None:
             self.data['ssh_keys'] = self.manager.all_ssh_keys()
+            self.cache_refreshed = True
+        if resource == 'floating_ips' or resource is None:
+            self.data['floating_ips'] = self.manager.all_floating_ips()
             self.cache_refreshed = True
         if resource == 'domains' or resource is None:
             self.data['domains'] = self.manager.all_domains()
@@ -423,6 +441,7 @@ class DigitalOceanInventory(object):
         return
 
     def add_host(self, group, host):
+        group = DigitalOceanInventory.to_safe(group)
         """ Helper method to reduce host duplication """
         if group not in self.inventory:
             self.add_inventory_group(group)
@@ -441,26 +460,34 @@ class DigitalOceanInventory(object):
             '_meta': {'hostvars': {}}
         }
 
+        # Floating IP Lookup
+        all_floating_ips = [i['ip'] for i in self.data['floating_ips']]
+
         # add all droplets by id and name
         for droplet in self.data['droplets']:
-            for net in droplet['networks']['v4']:
+            droplet_floating_ips = []
+            for i, net in enumerate(droplet['networks']['v4']):
                 if net['type'] == 'public':
-                    dest = net['ip_address']
+                    if net['ip_address'] in all_floating_ips:
+                        droplet_floating_ips.append(net['ip_address'])
+                        droplet['networks']['v4'][i]['floating_ip'] = True
+                    else:
+                        dest = net['ip_address']
+                        droplet['networks']['v4'][i]['floating_ip'] = False
                 else:
+                    droplet['networks']['v4'][i]['floating_ip'] = False
                     continue
 
             self.inventory['all']['hosts'].append(dest)
 
-            self.add_host(droplet['id'], dest)
-
-            self.add_host(droplet['name'], dest)
-
             # groups that are always present
             for group in ('digital_ocean',
+                          droplet['name'],
+                          'id_' + str(droplet['id']), 
                           'region_' + droplet['region']['slug'],
                           'image_' + str(droplet['image']['id']),
                           'size_' + droplet['size']['slug'],
-                          'distro_' + DigitalOceanInventory.to_safe(droplet['image']['distribution']),
+                          'distro_' + droplet['image']['distribution'],
                           'status_' + droplet['status']):
                 self.add_host(group, dest)
 
@@ -468,8 +495,11 @@ class DigitalOceanInventory(object):
             for group in (droplet['image']['slug'],
                           droplet['image']['name']):
                 if group:
-                    image = 'image_' + DigitalOceanInventory.to_safe(group)
+                    image = 'image_' + group
                     self.add_host(image, dest)
+
+            for group in droplet_floating_ips:
+                self.add_host('floating_ip_' + group, dest)
 
             if droplet['tags']:
                 for tag in droplet['tags']:
@@ -525,7 +555,7 @@ class DigitalOceanInventory(object):
     @staticmethod
     def to_safe(word):
         """ Converts 'bad' characters in a string to underscores so they can be used as Ansible groups """
-        return re.sub(r"[^A-Za-z0-9\-.]", "_", word)
+        return re.sub(r"[^A-Za-z0-9]", "_", word)
 
     @staticmethod
     def do_namespace(data):
@@ -538,4 +568,5 @@ class DigitalOceanInventory(object):
 
 ###########################################################################
 # Run the script
+###########################################################################
 DigitalOceanInventory()
