@@ -483,7 +483,7 @@ class DigitalOceanInventory(object):
             # groups that are always present
             for group in ('digital_ocean',
                           droplet['name'],
-                          'id_' + str(droplet['id']), 
+                          'id_' + str(droplet['id']),
                           'region_' + droplet['region']['slug'],
                           'image_' + str(droplet['image']['id']),
                           'size_' + droplet['size']['slug'],
